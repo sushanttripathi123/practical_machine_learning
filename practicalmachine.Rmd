@@ -1,0 +1,142 @@
+---
+title: "Course Project"
+author: "Allie Rogers"
+date: "3/13/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Exploratory Data Analysis
+
+```{r load packages}
+library(plyr)
+library(dplyr)
+library(caret)
+library(gbm)
+
+train <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv')
+test <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv')
+summary(train$user_name)
+summary(train$classe)
+```
+
+## Imputing Missing Values
+
+The missing values are evenly distributed across multiple users. Instances that are missing a value for one variation, average, or standard deviation column are the same instances that are missing values for the other variation, average, and standard deviation columns.
+
+# ```{r missing}
+# train %>% 
+#   filter(is.na(avg_pitch_belt)) %>% 
+#   summary()
+# ```
+
+Impute the missing values with the mean.
+
+```{r impute}
+impute_missing <- function(v) {
+  if(is.numeric(v)) {
+      avg <- mean(v, na.rm = TRUE)
+      v[which(is.na(v))] <- avg
+  }
+  v
+}
+
+train_processed <- as.data.frame(sapply(X = train, FUN = impute_missing))
+train_processed$classe <- as.factor(train_processed$classe)
+```
+
+Find the most important variables. 
+```{r importance}
+library(purrr)
+raw_data <- train_processed %>% 
+  select(-X, -user_name) %>% 
+  map_df(~ {
+    if(is.character(.)) { . <- factor(.)
+    return(forcats::fct_lump(f = ., n = 20))
+    } else {
+      return(.)
+    }
+  }) 
+
+my_gbm <- gbm(formula = classe ~ .
+              , data = raw_data
+              , distribution = "multinomial"
+              , n.trees = 300
+              , n.minobsinnode = 30
+              #  , shrinkage = shrinkage
+              #  , bag.fraction = 0.5
+              #  , train.fraction = train.fraction
+              #  , cv.folds = cv.folds
+              , verbose = F)
+
+importance_summary <- summary(my_gbm)
+# importance_summary
+```
+
+Create models off the processed data. Try gbm and random forest.
+```{r modeling}
+nvar <- 7
+outcome_var <- "classe"
+model_df <- raw_data %>% 
+  select_(.dots = c(paste(importance_summary$var[1:nvar]), outcome_var))
+
+trainFrac <- 0.80
+train_rows <- sample(x = 1:nrow(model_df), size = trainFrac * nrow(model_df), replace = FALSE)
+test_rows <- setdiff(x = 1:nrow(model_df), y = train)
+train_df <- model_df[train_rows, ]
+test_df <- model_df[test_rows, ]
+
+```
+
+Fit a gbm model and make prediction on my test set to measure accuracy.
+```{r fit}
+gbm_fit <- train(classe ~ ., method = "gbm", data = train_df, verbose = FALSE)
+summary(gbm_fit)
+
+preds <- predict(object = gbm_fit, newdata = test_df)
+summary(preds)
+test_df_compare <- cbind(as.data.frame(test_df), preds) %>% 
+  mutate(match = (classe == preds))
+
+sum(test_df_compare$match) / nrow(test_df_compare)
+
+test_df_compare %>% 
+  group_by(classe) %>% 
+  summarize(match_rate = sum(classe == preds) / n())
+
+confusionMatrix(data = preds, reference = test_df_compare$classe)
+```
+GBM model accurately predicted the classe 86% of the time. It is least accurate at measuring classe 2, sitting down.
+
+```{r random forest}
+rf_fit <- train(classe ~ ., method = "rf", data = train_df)
+rf_fit$finalModel
+
+preds_rf <- predict(object = rf_fit, newdata = test_df)
+summary(preds_rf)
+rf_compare <- cbind(as.data.frame(test_df), preds_rf) %>% 
+  mutate(match = (classe == preds_rf))
+
+sum(rf_compare$match) / nrow(rf_compare)
+
+rf_compare %>% 
+  group_by(classe) %>% 
+  summarize(match_rate = sum(classe == preds_rf) / n())
+
+confusionMatrix(data = preds_rf, reference = rf_compare$classe)
+```
+
+The random forest model performs better, accurate at 99% on my test set. Use the random forest model to predict on the coursera test set. First, process the test set as I processed the train set.
+
+```{r test predict}
+test_processed <- as.data.frame(sapply(X = test, FUN = impute_missing))
+preds_final <- predict(object = rf_fit, newdata = test_processed)
+preds_final_df <- as.data.frame(cbind(test_processed$X, preds_final))
+names(preds_final_df) <- c('X', 'pred')
+preds_final_df
+```
+
+
